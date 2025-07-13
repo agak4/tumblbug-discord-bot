@@ -1,0 +1,9 @@
+discord.py
+python-dotenv
+pymongo
+selenium
+webdriver-manager
+certifi
+urllib3
+chardet
+psutil
