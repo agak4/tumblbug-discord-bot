@@ -1,9 +1,13 @@
 import discord
-from discord import app_commands
-from discord.ext import commands, tasks
 import logging
 import asyncio
 import os
+import certifi
+import psutil
+import time
+import traceback
+from discord import app_commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from pymongo import MongoClient, errors
 from pymongo.server_api import ServerApi
@@ -15,9 +19,6 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, WebDriverException, NoSuchElementException
 from webdriver_manager.chrome import ChromeDriverManager
-import certifi
-import psutil
-import time
 
 load_dotenv()
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
@@ -148,7 +149,7 @@ class TumblbugBot(commands.Bot):
         async with self.driver_lock:
             if not self.driver:
                 options = ChromeOptions()
-                options.add_argument('--headless=new')
+                # options.add_argument('--headless=new')
                 options.add_argument('--disable-gpu')
                 options.add_argument('--no-sandbox')
                 options.add_argument('--disable-dev-shm-usage')
@@ -156,12 +157,14 @@ class TumblbugBot(commands.Bot):
                 options.add_argument('--window-size=1280,800')
                 options.add_argument('--disable-infobars')
                 options.add_argument('--no-single-process')
+                options.add_argument('--log-level=3')
+                options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Whale/4.32.315.22 Safari/537.36")
 
                 prefs = {
                     "profile.managed_default_content_settings.images": 2,
-                    "profile.default_content_setting_values.cookies": 2,
                     "profile.managed_default_content_settings.stylesheets": 2,
                     "profile.managed_default_content_settings.plugins": 2,
+                    "profile.managed_default_content_settings.javascript": 1
                 }
                 options.add_experimental_option("prefs", prefs)
                 options.page_load_strategy = 'none'
@@ -179,46 +182,88 @@ class TumblbugBot(commands.Bot):
             return self.driver
 
     async def get_project_data(self, url):
-        max_retries = 3
-        retry_count = 0
-        while retry_count < max_retries:
+        try:
+            driver = await self.get_driver()
+            driver.get(url)
+
+            wait = WebDriverWait(driver, 10)
+            
+            project_title = None
+            current_funding = None
+            image_url = None
+
+            # 프로젝트 제목 가져오기 시도
             try:
-                driver = await self.get_driver()
-                driver.get(url)
+                project_title_element = wait.until(
+                    EC.visibility_of_element_located((By.CSS_SELECTOR, 'h1[class*="styled__ProjectTitle-sc-"]'))
+                )
+                project_title = project_title_element.text.strip()
+            except TimeoutException as e:
+                # 타임아웃 발생 시 스크린샷 저장
+                screenshot_path = f"screenshot_timeout_{time.time()}.png"
+                self.driver.save_screenshot(screenshot_path)
+                logging.error(f"프로젝트 제목 요소를 찾을 수 없습니다 (Timeout): {url} - 로케이터: h1[class*=\"styled__ProjectTitle-sc-\"]")
+                logging.error(f"스크린샷 저장됨: {screenshot_path}")
+                logging.error(f"페이지 로딩 또는 요소 찾기 시간 초과: {url} - 오류: {e}")
+                logging.error(f"현재 URL: {self.driver.current_url}")
+                logging.error(f"페이지 소스 (일부): {self.driver.page_source[:500]}...") # 페이지 소스의 일부 출력
+                raise # 예외 다시 발생시켜 문제 확인
+            except WebDriverException as e:
+                # WebDriver 관련 다른 오류 처리
+                logging.error(f"WebDriver 오류 발생: {url} - 오류: {e}")
+                logging.error(f"현재 URL: {self.driver.current_url}")
+                raise
+            except Exception as e:
+                logging.error(f"예상치 못한 오류 발생: {url} - 오류: {e}", exc_info=True)
+                raise
 
-                wait = WebDriverWait(driver, 10)
-                project_title = wait.until(
-                    EC.presence_of_element_located((By.CLASS_NAME, 'ProjectIntroduction__ProjectTitle-sc-1bohq0d-5'))
-                ).text.strip()
-
+            # 펀딩 금액 가져오기 시도
+            try:
                 price_element = wait.until(
-                    EC.presence_of_element_located((By.CLASS_NAME, 'FundingOverallStatus__Price-sc-1mw9efs-4'))
+                    EC.visibility_of_element_located((By.CSS_SELECTOR, '[class*="FundingOverallStatus__StatusValue-"]'))
                 )
                 price_text = price_element.text.strip()
-                current_funding = int(price_text.replace(',', '').replace('원', ''))
+                
+                current_funding = int(price_text.replace(',', '').replace('원', '').replace('%', '').replace('명', '').strip())
+            except TimeoutException:
+                logging.error(f"펀딩 금액 요소를 찾을 수 없습니다 (Timeout): {url} - 로케이터: [class*=\"FundingOverallStatus__StatusValue-\"]")
+                raise # 외부 TimeoutException 핸들러로 다시 발생
+            except NoSuchElementException:
+                logging.error(f"펀딩 금액 요소를 찾을 수 없습니다 (NoSuchElement): {url} - 로케이터: [class*=\"FundingOverallStatus__StatusValue-\"]")
+                raise # 외부 NoSuchElementException 핸들러로 다시 발생
 
+            # 이미지 URL 가져오기 시도 (필수적이지 않다면 오류 발생 시 None 반환)
+            try:
                 image_element = wait.until(
-                    EC.presence_of_element_located((By.CLASS_NAME, 'IntroVisual__ProjectCoverImage-sc-179fy6t-1'))
+                    EC.visibility_of_element_located((By.CSS_SELECTOR, '[class*="SingleCoverImage__ProjectCoverImage-"]'))
                 )
                 image_url = image_element.find_element(By.TAG_NAME, "img").get_attribute("src")
+            except (TimeoutException, NoSuchElementException):
+                logging.warning(f"프로젝트 이미지 요소를 찾을 수 없습니다: {url} (계속 진행)")
+                image_url = None # 이미지는 필수가 아닐 경우 None으로 처리
 
-                return project_title, current_funding, image_url
+            return project_title, current_funding, image_url
 
-            except TimeoutException:
-                retry_count += 1
-                logging.warning(f"페이지 로딩 시간 초과: {url} (재시도 {retry_count}/{max_retries})")
-                if retry_count < max_retries:
-                    await asyncio.sleep(5)  # 5초 대기 후 재시도
-                else:
-                    logging.error(f"페이지 로딩 시간 초과: {url} (최대 재시도 횟수 초과)")
-                    logging.error(f"페이지 소스: {driver.page_source}")  # 페이지 소스를 로그로 출력
-                    return None, None, None
-            except WebDriverException as e:
-                logging.error(f"WebDriver 오류: {url} - {e}")
-                return None, None, None
-            except Exception as e:
-                logging.error(f"프로젝트 정보 가져오기 실패: {url} - {e}")
-                return None, None, None
+        except TimeoutException as e:
+            logging.error(f"페이지 로딩 또는 요소 찾기 시간 초과: {url} - 오류: {e}")
+            logging.error(f"현재 URL: {driver.current_url}")
+            logging.error(f"트레이스백:\n{traceback.format_exc()}")
+            return None, None, None
+        except NoSuchElementException as e:
+            logging.error(f"필수 요소를 찾을 수 없음: {url} - 오류: {e}")
+            logging.error(f"현재 URL: {driver.current_url}")
+            logging.error(f"트레이스백:\n{traceback.format_exc()}")
+            return None, None, None
+        except WebDriverException as e:
+            logging.error(f"WebDriver 오류: {url} - 오류: {e}")
+            logging.error(f"현재 URL: {driver.current_url}")
+            logging.error(f"트레이스백:\n{traceback.format_exc()}")
+            return None, None, None
+        except Exception as e:
+            logging.error(f"프로젝트 정보 가져오기 실패: {url} - 오류: {e}")
+            logging.error(f"현재 URL: {driver.current_url}")
+            logging.error(f"트레이스백:\n{traceback.format_exc()}")
+            return None, None, None
 
     def format_price(self, price):
         return f"{price:,}원"
