@@ -149,7 +149,7 @@ class TumblbugBot(commands.Bot):
         async with self.driver_lock:
             if not self.driver:
                 options = ChromeOptions()
-                # options.add_argument('--headless=new')
+                options.add_argument('--headless=new')
                 options.add_argument('--disable-gpu')
                 options.add_argument('--no-sandbox')
                 options.add_argument('--disable-dev-shm-usage')
@@ -161,7 +161,6 @@ class TumblbugBot(commands.Bot):
                 options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Whale/4.32.315.22 Safari/537.36")
 
                 prefs = {
-                    "profile.managed_default_content_settings.images": 2,
                     "profile.managed_default_content_settings.stylesheets": 2,
                     "profile.managed_default_content_settings.plugins": 2,
                     "profile.managed_default_content_settings.javascript": 1
@@ -199,7 +198,6 @@ class TumblbugBot(commands.Bot):
                 )
                 project_title = project_title_element.text.strip()
             except TimeoutException as e:
-                # 타임아웃 발생 시 스크린샷 저장
                 screenshot_path = f"screenshot_timeout_{time.time()}.png"
                 self.driver.save_screenshot(screenshot_path)
                 logging.error(f"프로젝트 제목 요소를 찾을 수 없습니다 (Timeout): {url} - 로케이터: h1[class*=\"styled__ProjectTitle-sc-\"]")
@@ -209,7 +207,6 @@ class TumblbugBot(commands.Bot):
                 logging.error(f"페이지 소스 (일부): {self.driver.page_source[:500]}...") # 페이지 소스의 일부 출력
                 raise # 예외 다시 발생시켜 문제 확인
             except WebDriverException as e:
-                # WebDriver 관련 다른 오류 처리
                 logging.error(f"WebDriver 오류 발생: {url} - 오류: {e}")
                 logging.error(f"현재 URL: {self.driver.current_url}")
                 raise
@@ -220,26 +217,36 @@ class TumblbugBot(commands.Bot):
             # 펀딩 금액 가져오기 시도
             try:
                 price_element = wait.until(
-                    EC.visibility_of_element_located((By.CSS_SELECTOR, '[class*="FundingOverallStatus__StatusValue-"]'))
+                    EC.visibility_of_element_located((By.CSS_SELECTOR, '[class*="FundingOverallStatus__StatusValue-"] > span:first-child'))
                 )
                 price_text = price_element.text.strip()
                 
-                current_funding = int(price_text.replace(',', '').replace('원', '').replace('%', '').replace('명', '').strip())
+                current_funding = int(price_text.replace(',', '').replace('원', '').strip())
             except TimeoutException:
-                logging.error(f"펀딩 금액 요소를 찾을 수 없습니다 (Timeout): {url} - 로케이터: [class*=\"FundingOverallStatus__StatusValue-\"]")
+                logging.error(f"펀딩 금액 요소를 찾을 수 없습니다 (Timeout): {url} - 로케이터: [class*=\"FundingOverallStatus__StatusValue-\"] > span:first-child")
                 raise # 외부 TimeoutException 핸들러로 다시 발생
             except NoSuchElementException:
-                logging.error(f"펀딩 금액 요소를 찾을 수 없습니다 (NoSuchElement): {url} - 로케이터: [class*=\"FundingOverallStatus__StatusValue-\"]")
+                logging.error(f"펀딩 금액 요소를 찾을 수 없습니다 (NoSuchElement): {url} - 로케이터: [class*=\"FundingOverallStatus__StatusValue-\"] > span:first-child")
                 raise # 외부 NoSuchElementException 핸들러로 다시 발생
 
             # 이미지 URL 가져오기 시도 (필수적이지 않다면 오류 발생 시 None 반환)
             try:
-                image_element = wait.until(
-                    EC.visibility_of_element_located((By.CSS_SELECTOR, '[class*="SingleCoverImage__ProjectCoverImage-"]'))
+                image_container_element = wait.until(
+                    EC.visibility_of_element_located((By.CSS_SELECTOR, 
+                        '[class*="SingleCoverImage__ProjectCoverImage-"], [class*="CoverImageList__MainImageContainer-"]'
+                    ))
                 )
-                image_url = image_element.find_element(By.TAG_NAME, "img").get_attribute("src")
+                
+                image_elements = image_container_element.find_elements(By.TAG_NAME, "img")
+                
+                if image_elements:
+                    image_url = image_elements[0].get_attribute("src")
+                else:
+                    logging.warning(f"프로젝트 이미지 요소를 찾을 수 없습니다: {url} (img 태그 없음)")
+                    image_url = None
+
             except (TimeoutException, NoSuchElementException):
-                logging.warning(f"프로젝트 이미지 요소를 찾을 수 없습니다: {url} (계속 진행)")
+                logging.warning(f"프로젝트 이미지 컨테이너 요소를 찾을 수 없습니다: {url} (계속 진행)")
                 image_url = None # 이미지는 필수가 아닐 경우 None으로 처리
 
             return project_title, current_funding, image_url
@@ -335,7 +342,6 @@ class TumblbugBot(commands.Bot):
                     color=discord.Color.green(),
                     url=url
                 )
-                embed.add_field(name="프로젝트 링크", value=url, inline=False)
                 await self.send_notifications(guild_id, embed)
                 removed_thresholds.append(threshold)
 
@@ -377,7 +383,7 @@ class TumblbugBot(commands.Bot):
                             description=f"초기 금액: {self.format_price(current_funding)}",
                             color=discord.Color.blue()
                         )
-                        embed.add_field(name="프로젝트 링크", value=url, inline=False)
+                        # embed.add_field(name="프로젝트 링크", value=url, inline=False)
                         await self.send_notifications(guild_id, embed)
                         continue
 

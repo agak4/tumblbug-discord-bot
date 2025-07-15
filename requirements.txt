@@ -7,3 +7,4 @@ certifi
 urllib3
 chardet
 psutil
+dnspython
